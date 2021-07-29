@@ -1,0 +1,1159 @@
+---
+title: "A review and comparison of area under the curve methods for estimating salmon escapement"
+author: "Minzee Kim"
+date: "30/07/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+===================================== TAUC =====================================
+
+# TAUC estimation
+
+```{r}
+
+tauc_ <- function(oc, t, m, l, v) {
+  
+  area <- c() 
+  for (i in 1:length(oc)-1) {
+    t.area <- 0.5 * (t[i+1] - t[i]) * (oc[i] + oc[i+1]) 
+    area <- c(area, t.area)
+  }
+  
+  auc <- oc[1] * m * 0.5 + oc[length(oc)] * m * 0.5 + sum(area)
+
+  return(auc/(l*v))
+}
+
+
+TAUC <- function(df, t, m, l, v) {
+  
+  apply(df, 1, tauc_, t=t, m=m, l=l, v=v)
+}
+
+```
+
+# TAUC uncertainty
+
+```{r}
+
+uncert.t_ <- function(oc, t, l, v) {
+  
+  g <- glm(oc ~ t + I(t^2), family = quasipoisson)
+  c.hat <- as.vector(exp(predict(g)))
+  
+  phi.hat <- (1/(length(oc)-3)) * sum((oc-c.hat)^2/c.hat)
+  
+  inside <- c()
+  for (i in 2:length(t)-1) {
+    insi <- c.hat[i] * (t[i+1]-t[i-1])^2
+    inside <- c(inside, insi)
+  }
+  
+  var.F <-sum(inside) * 0.25 * phi.hat
+
+  k.sq <- (1/(l*v))^2
+  
+  return(var.F * k.sq)
+}
+
+
+Uncert.T <- function(df, t, l, v) {
+  
+  apply(df, 1, uncert.t_, t=t, l=l, v=v)
+}
+
+```
+
+
+===================================== GAUC ===================================== 
+
+# GAUC estimation
+
+```{r}
+
+gauc_ <- function(oc, t, l, v) {
+  
+  g <- glm(oc ~ t + I(t^2), family = quasipoisson)
+  x <- coef(g)
+  
+  f <- sqrt(-pi/x[3]) * exp(x[1]-x[2]^2/(4*x[3]))
+  E <- f/(l*v)
+  
+  return(E)
+}
+
+
+GAUC <- function(df, t, l, v) {
+  
+  apply(df, 1, gauc_, t=t, l=l, v=v)
+
+}
+
+```
+
+# GAUC uncertainty
+
+```{r}
+
+uncert.g_ <- function(oc, t, l, v) {
+  
+  g <- glm(oc ~ t + I(t^2), family = quasipoisson)
+  x <- coef(g)
+  varmat <- vcov(g)
+  
+  d1 <- (-2*x[2])/(4*x[3])
+  d2 <- -1/(2*x[3]) + x[2]^2/(4*x[3]^2)
+  
+  v11 <- varmat[1,1]
+  v12 <- d1*varmat[1,2] + d2*varmat[1,3]
+  v22 <- (d1^2)*varmat[2,2] + 2*d1*d2*varmat[2,3] + (d2^2)*varmat[3,3]
+  
+  f <- sqrt(-pi/x[3]) * exp(x[1]-x[2]^2/(4*x[3]))
+  
+  var.f <- (v11 + 2*v12 + v22) * f^2
+  var.E <- var.f/(l^2 * v^2)
+  
+  return(var.E)
+}
+
+
+Uncert.G <- function(df, t, l, v) {
+  
+  apply(df, 1, uncert.g_, t=t, l=l, v=v)
+}  
+
+```
+
+
+===================================== ML-N =====================================
+
+# ML (normal) estimation
+
+```{r}
+
+harr.n <- function(param, t, l, v, c) {
+  
+  E <- param[1]
+  ma <- param[2]
+  ta <- param[3]
+  sigma.e <- param[4] 
+  
+  Nt <- E * (pnorm(t, ma, ta) - pnorm(t-l, ma, ta))
+  C <- Nt * v
+
+  loglikelihood <- -sum(log(1) - log(sigma.e) - 0.5*log(2*pi) -(c-C)^2/(2*sigma.e^2))
+  return(loglikelihood)
+}
+
+
+opt.n <- function(initial, func, lower, upper, t, l, v, c) {
+  
+  max.value <- optim(initial, harr.n, lower=lower, upper=upper, t=t, l=l, v=v, c=c, method = 'L-BFGS-B')$par[1]
+  return(max.value)
+}
+
+HARR.N <- function(df, initial, func, lower, upper, t, l, v) {
+  
+  apply(df, 1, opt.n, initial=initial, func=func, lower=lower, upper=upper, t=t, l=l, v=v)
+}
+
+```
+
+# ML (normal) uncertainty
+
+```{r}
+
+uncert.h.n_ <- function(initial, func, lower, upper, t, l, v, c) {
+  
+  fit <- optim(initial, func, lower=lower, upper=upper, t=t, l=l, v=v, c=c, method='L-BFGS-B', hessian=T)
+  hessian.m <- solve(fit$hessian)
+  var <- diag(hessian.m)
+  return(var[1])
+}
+
+
+Uncert.H.N <- function(df, initial, func, lower, upper, t, l, v) {
+  
+  apply(df, 1, uncert.h.n_, initial=initial, func=func, lower=lower, upper=upper, t=t, l=l, v=v)
+}
+
+
+```
+
+
+===================================== ML-LN ====================================
+
+
+# ML (lognormal) estimation
+
+```{r}
+
+harr.ln <- function(param, t, l, v, c) {
+  
+  E <- param[1]
+  ma <- param[2]
+  ta <- param[3]
+  sigma.e <- param[4] 
+  
+  Nt <- E * (pnorm(t, ma, ta) - pnorm(t-l, ma, ta))
+  C <- Nt * v
+
+  loglikelihood <- -sum(log(1) - log(sigma.e) - 0.5*log(2*pi) + log(1) - log(c) - (log(c)-log(C))^2/(2*sigma.e^2))
+  return(loglikelihood)
+}
+
+opt.l <- function(initial, func, lower, upper, t, l, v, c) {
+  
+  max.value <- optim(initial, harr.ln, lower=lower, upper=upper, t=t, l=l, v=v, c=c, method = 'L-BFGS-B')$par[1]
+  return(max.value)
+}
+
+HARR.LN <- function(df, initial, func, lower, upper, t, l, v) {
+  
+  apply(df, 1, opt.l, func=func, initial=initial, lower=lower, upper=upper, t=t, l=l, v=v)
+}
+
+```
+
+# ML (lognormal) uncertainty
+
+```{r}
+
+uncert.h.l_ <- function(initial, func, lower, upper, t, l, v, c) {
+  
+  fit <- optim(initial, harr.ln, lower = lower, upper = upper, t=t, l=l, v=v, c=c, method = 'L-BFGS-B', hessian = TRUE)
+  hessian.m <- solve(fit$hessian)
+  var <- diag(hessian.m)
+  return(var[1])
+}
+
+Uncert.H.L <- function(df, initial, func, lower, upper, t, l, v) {
+  
+  apply(df, 1, uncert.h.l_, initial=initial, func=func, lower=lower, upper=upper, t=t, l=l, v=v)
+}
+
+
+```
+
+
+===================================== ML-P =====================================
+
+# ML (pseudopoisson) estimation
+
+```{r}
+
+harr.p <- function(param, t, l, v, c) {
+  
+  E <- param[1]
+  ma <- param[2]
+  ta <- param[3]
+  q <- param[4] 
+  
+  Nt <- E * (pnorm(t, ma, ta) - pnorm(t-l, ma, ta))
+  C <- Nt * v
+  var.e <- q * C
+
+  loglikelihood <- -sum(log(1) - 0.5*log(2*pi*var.e) -(c-C)^2/(2*var.e))
+  return(loglikelihood)
+}
+
+
+opt.p <- function(initial, func, lower, upper, t, l, v, c) {
+  
+  max.value <- optim(initial, harr.p, lower=lower, upper=upper, t=t, l=l, v=v, c=c, method = 'L-BFGS-B')$par[1]
+  return(max.value)
+}
+
+HARR.P <- function(df, initial, func, lower, upper, t, l, v) {
+  
+  apply(df, 1, opt.p, func=func, initial=initial, lower=lower, upper=upper, t=t, l=l, v=v)
+}
+
+```
+
+
+# ML (pseudopoisson) estimation
+
+```{r}
+
+uncert.h.p_ <- function(initial, func, lower, upper, t, l, v, c) {
+  
+  fit <- optim(initial, func, lower=lower, upper=upper, t=t, l=l, v=v, c=c, method='L-BFGS-B', hessian=T)
+  hessian.m <- solve(fit$hessian)
+  var <- diag(hessian.m)
+  return(var[1])
+}
+
+Uncert.H.P <- function(df, initial, func, lower, upper, t, l, v) {
+  
+  apply(df, 1, uncert.h.p_, initial=initial, func=func, lower=lower, upper=upper, t=t, l=l, v=v)
+}
+
+
+```
+
+================================= Simulations ==================================
+
+Generating Nti curve: normal, beta
+Survey dates: 4, 6 (evenly spaced)
+Generating ci from Nti: normal, lognormal, pseudo-poisson
+
+# Generating Nti 
+
+```{r}
+
+# outputs two dataframes (arrival-death and time-actual counts)
+sim.pop <- function(E, a, b, t, l, dist) {
+  
+  # dataframe of arrival and death times, randomly generated
+  
+  if (dist == "normal") {
+    arrival <- rnorm(E, a, b)
+    
+  } else {
+    arrival <- rbeta(E, a, b) * (t[length(t)] - t[1]) + t[1]
+  }
+
+  death <- arrival + l
+  df <- data.frame(arrival, death)
+  
+  time <- seq(floor(min(df$arrival)), ceiling(max(df$death)), by=0.1)
+  
+  # actual count of fish in the water on that day based on arrival and death dataframe
+  ac <- rep(0, length(time))
+  
+  for (i in 1:length(time)) {
+    
+    for (j in 1:nrow(df)) {
+      
+      if (time[i] >= df$arrival[j] & time[i] < df$death[j]) {
+        ac[i] <- ac[i] + 1
+      } else {
+        ac[i] <- ac[i] + 0
+      }
+      
+    }
+    
+  }
+  
+  ac.df <- data.frame(time, ac)
+  # df: arrival-death dataframe; ac.df: time-actual counts dataframe
+  return(list(df = df, ac.df = ac.df))
+}
+
+
+
+sim.data <- function(ac.df, t, n, v, epsilon, sigma, q) {
+  
+  row <- which(ac.df$t %in% t)
+  ac <- ac.df[row,]$ac
+  Ci <- ac * v
+ 
+  if (epsilon == "normal") {
+    
+    sim.df <- replicate(n=n, Ci+rnorm(length(Ci), 0, sigma) )
+    
+  } else if (epsilon == "lognormal") {
+    
+    sim.df <- replicate(n=n, exp(log(Ci)+rnorm(length(Ci), 0, sigma)))
+    
+  } else {
+    
+    sim.df <- replicate(n=n, Ci+rnorm(length(Ci), 0, sqrt(q*Ci)))
+    
+  }
+  
+  t(sim.df)
+  
+}
+
+
+```
+
+
+# Plotting outcomes
+
+```{r}
+
+library(rsimsum)
+library(ggplot2)
+library(ggpubr)
+
+
+# Relative bias
+plotting.bias <- function(vec, l.lim, u.lim) {
+  
+  aucmethod <- rep(c("TAUC", "GAUC", "ML_ln", "ML_n", "ML_pp"), each = 2000)
+  aucestimate <- vec
+  
+  estimate.df <- data.frame(aucmethod, aucestimate)
+
+  s1 <- simsum(data = estimate.df, estvarname = "aucestimate", true = 1000,  methodvar = "aucmethod", ref = "TAUC")
+  ss1 <- summary(s1)
+  
+  bias <- ggplot(ss1[["summ"]][c(4, 11, 18, 25, 32),], 
+                 aes(x = aucmethod, y = (est/1000)*100, ymin = (lower/1000)*100, ymax = (upper/1000)*100)) + 
+    geom_hline(yintercept = 0, color = "red", lty = "dashed") +
+    geom_point() +
+    geom_errorbar(width = 1 / 3) +
+    theme_bw() +
+    labs(x = "Method", y = " Relative Bias (%)") +
+    theme(axis.title=element_text(size=25), axis.text=element_text(size=20))+
+    ylim(l.lim, u.lim)+
+    scale_x_discrete(limits = c("TAUC", "ML_n", "ML_ln", "ML_pp", "GAUC"))
+  
+  bias
+  
+}
+
+
+# Relative RMSE
+plotting.mse <- function(vec, l.lim, u.lim) {
+  
+  aucmethod <- rep(c("TAUC", "GAUC", "ML_ln", "ML_n", "ML_pp"), each = 2000)
+  aucestimate <- vec
+  
+  estimate.df <- data.frame(aucmethod, aucestimate)
+
+  s1 <- simsum(data = estimate.df, estvarname = "aucestimate", true = 1000, methodvar = "aucmethod", ref = "TAUC")
+  ss1 <- summary(s1)
+  
+  mse <- ggplot(ss1[["summ"]][c(6, 13, 20, 27, 34),], 
+                aes(x = aucmethod, y = 100* sqrt(est)/1000, ymin = 100 * sqrt(lower)/1000, ymax = 100 * sqrt(upper)/1000)) + 
+    geom_hline(yintercept = 0, color = "red", lty = "dashed") +
+    geom_point() +
+    geom_errorbar(width = 1 / 3) +
+    theme_bw() +
+    labs(x = "Method", y = "RRMSE (%)") +
+    theme(axis.title=element_text(size=25), axis.text=element_text(size=20)) +
+    ylim(l.lim, u.lim) +
+    scale_x_discrete(limits = c("TAUC", "ML_n", "ML_ln", "ML_pp", "GAUC"))
+  
+  mse
+  
+}
+
+# Finding standard error from estimates 
+truevar <- function(vec.e) {
+  
+  aucmethod <- rep(c("TAUC", "GAUC", "ML_ln", "ML_n", "ML_pp"), each = 2000)
+  aucestimate <- vec.e
+  
+  estimate.df <- data.frame(aucmethod, aucestimate)
+
+  s1 <- simsum(data = estimate.df, estvarname = "aucestimate", true = 1000,  methodvar = "aucmethod", ref = "TAUC") 
+  ss1 <- summary(s1)
+  
+  vec.var <- rep(0, 5)
+  vec.var[1] <- ss1[["summ"]][6,2] - ss1[["summ"]][4,2]^2
+  vec.var[2] <- ss1[["summ"]][13,2] - ss1[["summ"]][11,2]^2
+  vec.var[3] <- ss1[["summ"]][20,2] - ss1[["summ"]][18,2]^2
+  vec.var[4] <- ss1[["summ"]][27,2] - ss1[["summ"]][25,2]^2
+  vec.var[5] <- ss1[["summ"]][34,2] - ss1[["summ"]][32,2]^2
+  
+  return(sqrt(vec.var))
+}
+
+
+
+plotting.unc <- function(vec1, vec2, vec3, vec4, vec5, se, l.lim, u.lim) {
+  
+  aucmethod <- rep(c("TAUC", "GAUC", "ML_ln", "ML_n", "ML_pp"), each = 2000)
+  vec.a <- (sqrt(vec1)-se[1])/se[1]
+  vec.b <- (sqrt(vec2)-se[2])/se[2]
+  vec.c <- (sqrt(vec3)-se[3])/se[3]
+  vec.d <- (sqrt(vec4)-se[4])/se[4]
+  vec.e <- (sqrt(vec5)-se[5])/se[5]
+  aucestimate <- c(vec.a, vec.b, vec.c, vec.d, vec.e)
+  
+  estimate.df <- data.frame(aucmethod, aucestimate)
+
+  s1 <- simsum(data = estimate.df, estvarname = "aucestimate", true=0,  methodvar = "aucmethod", ref = "TAUC") 
+  ss1 <- summary(s1)
+  
+  bias <- ggplot(ss1[["summ"]][c(4, 11, 18, 25, 32),], 
+                 aes(x = aucmethod, y = est*100, ymin = lower*100, ymax = upper*100)) + 
+    geom_hline(yintercept = 0, color = "red", lty = "dashed") +
+    geom_point() +
+    geom_errorbar(width = 1 / 3) +
+    theme_bw() +
+    labs(x = "Method", y = "Relative Bias (%)") +
+    theme(axis.title=element_text(size=25), axis.text=element_text(size=20)) +
+    ylim(l.lim, u.lim)+
+    scale_x_discrete(limits = c("TAUC", "ML_n", "ML_ln", "ML_pp", "GAUC"))
+  
+  bias
+  
+}
+
+
+
+```
+
+
+
+=================================== Results ====================================
+
+
+# Simulation 1: normal arrival, 4 counts, normal model
+
+```{r}
+library("ggplot2")
+
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(30, 80, length.out = 4))
+pop <- sim.pop(1000, 50, 10, t, l, "normal")
+simdata <- sim.data(ac.df=pop$ac.df, t=t, n=2000, v=v, epsilon="normal", sigma=1)
+
+ggplot(pop$df, aes(x = arrival)) + 
+  geom_histogram(binwidth = 1, color = "black", fill = "grey") +
+  theme_bw() + 
+  labs(x = "Arrival day", y = "Number of fish arrived") +
+  theme(axis.title=element_text(size=25), axis.text=element_text(size=20))+ coord_cartesian(xlim=c(10, 90)) 
+
+ggplot(data=pop$ac.df, aes(x=time, y=ac)) +
+  geom_line(size = 1) +
+  theme_bw() + 
+  theme(axis.title=element_text(size=25), axis.text=element_text(size=20)) +
+  labs(x = "Day", y = "Abundance of fish") + xlim(15, 100)
+  
+```
+
+```{r}
+# estimates
+t.e.1 <- TAUC(simdata, t, 10, l, v)
+g.e.1 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.1 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)
+lower.l <- c(1, 10, 4, 0.01)
+upper.l <- c(2000, 80, 50, 2)
+ml.e.1 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 10, 7, 0.1)
+upper.p <- c(2000, 200, 40, 100)
+mp.e.1 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.1 <- Uncert.T(simdata, t, l, v)
+g.u.1 <- Uncert.G(simdata, t, l, v)
+
+mn.u.1 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.1 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.1 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+
+# visualization
+b1 <- plotting.bias(c(t.e.1, g.e.1, ml.e.1, mn.e.1, mp.e.1), -25, 25)
+
+m1 <- plotting.mse(c(t.e.1, g.e.1, ml.e.1, mn.e.1, mp.e.1), 0, 30)
+
+var1 <- truevar(c(t.e.1, g.e.1, ml.e.1, mn.e.1, mp.e.1))
+
+u1 <- plotting.unc(t.u.1, g.u.1, ml.u.1, mn.u.1, mp.u.1, var1, -110, 600)
+
+```
+
+
+# Simulation 2: normal arrival, 6 counts, normal model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(30, 80, length.out = 6))
+pop <- sim.pop(1000, 50, 10, t, l, "normal")
+simdata <- sim.data(ac.df=pop$ac.df, t=t, n=2000, v=v, epsilon="normal", sigma=1)
+
+# estimates
+t.e.2 <- TAUC(simdata, t, 10, l, v)
+g.e.2 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.2 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)
+lower.l <- c(1, 10, 4, 0.01)
+upper.l <- c(2000, 80, 50, 2)
+ml.e.2 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 10, 7, 0.1)
+upper.p <- c(2000, 200, 40, 100)
+mp.e.2 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.2 <- Uncert.T(simdata, t, l, v)
+g.u.2 <- Uncert.G(simdata, t, l, v)
+
+mn.u.2 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.2 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.2 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+ 
+
+# visualization
+b2 <- plotting.bias(c(t.e.2, g.e.2, ml.e.2, mn.e.2, mp.e.2), -25, 25)
+
+m2 <- plotting.mse(c(t.e.2, g.e.2, ml.e.2, mn.e.2, mp.e.2), 0, 30)
+
+var2 <- truevar(c(t.e.2, g.e.2, ml.e.2, mn.e.2, mp.e.2))
+
+u2 <- plotting.unc(t.u.2, g.u.2, ml.u.2, mn.u.2, mp.u.2, var2, -110, 1000)
+
+```
+
+
+# Simulation 3: normal arrival, 4 counts, lognormal model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(30, 80, length.out = 4))
+pop <- sim.pop(1000, 50, 10, t, l, "normal")
+simdata <- sim.data(ac.df=pop$ac.df, t=t, n=2000, v=v, epsilon="lognormal", sigma=0.1)
+
+# estimates
+t.e.3 <- TAUC(simdata, t, 10, l, v)
+g.e.3 <- GAUC(simdata, t, l, v)
+
+
+initial.n <- c(1000, 50, 10, 2) 
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.3 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+
+initial.l <- c(1000, 50, 10, 0.1)
+lower.l <- c(50, 10, 7, 0.01)
+upper.l <- c(2000, 80, 50, 5)
+ml.e.3 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 10, 7, 0.1)
+upper.p <- c(2000, 200, 40, 100)
+mp.e.3 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.3 <- Uncert.T(simdata, t, l, v)
+g.u.3 <- Uncert.G(simdata, t, l, v)
+
+mn.u.3 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.3 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.3 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+
+# visualization
+b3 <- plotting.bias(c(t.e.3, g.e.3, ml.e.3, mn.e.3, mp.e.3), -25, 25)
+
+m3 <- plotting.mse(c(t.e.3, g.e.3, ml.e.3, mn.e.3, mp.e.3), 0, 30)
+
+var3 <- truevar(c(t.e.3, g.e.3, ml.e.3, mn.e.3, mp.e.3))
+
+u3 <- plotting.unc(t.u.3, g.u.3, ml.u.3, mn.u.3, mp.u.3, var3, -110, 110)
+
+```
+
+
+# Simulation 4: normal arrival, 6 counts, lognormal model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(30, 80, length.out = 6))
+pop <- sim.pop(1000, 50, 10, t, l, "normal")
+simdata <- sim.data(ac.df=pop$ac.df, t=t, n=2000, v=v, epsilon="lognormal", sigma=0.1)
+
+# estimates
+t.e.4 <- TAUC(simdata, t, 10, l, v)
+g.e.4 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.4 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)
+lower.l <- c(50, 10, 7, 0.01)
+upper.l <- c(2000, 80, 50, 5)
+ml.e.4 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 10, 5, 0.1)
+upper.p <- c(2000, 80, 20, 100)
+mp.e.4 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.4 <- Uncert.T(simdata, t, l, v)
+g.u.4 <- Uncert.G(simdata, t, l, v)
+
+mn.u.4 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.4 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.4 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+# Visualization
+b4 <- plotting.bias(c(t.e.4, g.e.4, ml.e.4, mn.e.4, mp.e.4), -25, 25)
+
+m4 <- plotting.mse(c(t.e.4, g.e.4, ml.e.4, mn.e.4, mp.e.4), 0, 30)
+
+var4 <- truevar(c(t.e.4, g.e.4, ml.e.4, mn.e.4, mp.e.4))
+
+u4 <- plotting.unc(t.u.4, g.u.4, ml.u.4, mn.u.4, mp.u.4, var4, -110, 110)
+
+```
+
+
+# Simulation 5: normal arrival, 4 counts, pseudopoisson model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(30, 80, length.out = 4))
+pop <- sim.pop(1000, 50, 10, t, l, "normal")
+simdata <- sim.data(ac.df=pop$ac.df, t=t, n=2000, v=v, epsilon="pseudopoisson", q = 2)
+simdata[simdata < 0] <- 0.001
+
+# estimates
+t.e.5 <- TAUC(simdata, t, 10, l, v)
+g.e.5 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.5 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.5)
+lower.l <- c(50, 10, 7, 0.01)
+upper.l <- c(2000, 80, 50, 5)
+ml.e.5 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 10, 7, 0.1)
+upper.p <- c(2000, 200, 40, 100)
+mp.e.5 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty.
+t.u.5 <- Uncert.T(simdata, t, l, v)
+g.u.5 <- Uncert.G(simdata, t, l, v)
+
+mn.u.5 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.5 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.5 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+
+# Visualization
+b5 <- plotting.bias(c(t.e.5, g.e.5, ml.e.5, mn.e.5, mp.e.5), -25, 25)
+
+m5 <- plotting.mse(c(t.e.5, g.e.5, ml.e.5, mn.e.5, mp.e.5), 0, 30)
+
+var5 <- truevar(c(t.e.5, g.e.5, ml.e.5, mn.e.5, mp.e.5))
+
+u5 <- plotting.unc(t.u.5, g.u.5, ml.u.5, mn.u.5, mp.u.5, var5, -110, 110)
+
+
+```
+
+
+# Simulation 6: normal arrival, 6 counts, pseudopoisson model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(30, 80, length.out = 6))
+pop <- sim.pop(1000, 50, 10, t, l, "normal")
+simdata <- sim.data(ac.df=pop$ac.df, t=t, n=2000, v=v, epsilon="pseudopoisson", q = 2) 
+simdata[simdata < 0] <- 0.001
+
+# estimates
+t.e.6 <- TAUC(simdata, t, 10, l, v)
+g.e.6 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.6 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)
+lower.l <- c(50, 10, 8, 0.01)
+upper.l <- c(2000, 80, 50, 3)
+ml.e.6 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 10, 7, 0.1)
+upper.p <- c(2000, 200, 40, 100)
+mp.e.6 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.6 <- Uncert.T(simdata, t, l, v)
+g.u.6 <- Uncert.G(simdata, t, l, v)
+
+mn.u.6 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.6 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.6 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+# Visualization
+b6 <- plotting.bias(c(t.e.6, g.e.6, ml.e.6, mn.e.6, mp.e.6), -25, 25)
+
+m6 <- plotting.mse(c(t.e.6, g.e.6, ml.e.6, mn.e.6, mp.e.6), 0, 30)
+
+var6 <- truevar(c(t.e.6, g.e.6, ml.e.6, mn.e.6, mp.e.6))
+
+u6 <- plotting.unc(t.u.6, g.u.6, ml.u.6, mn.u.6, mp.u.6, var6, -110, 110)
+
+```
+
+
+# Simulation 7: beta arrival, 4 counts, normal model
+
+```{r}
+library(ggplot2)
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(25, 85, length.out = 4))
+pop <- sim.pop(1000, 2, 4, t, l, "beta")
+t1 <- round(seq(30, 80, length.out = 4))
+simdata <- sim.data(ac.df=pop$ac.df, t=t1, n=2000, v=v, epsilon="normal", sigma=1)
+
+ggplot(pop$df, aes(x = arrival)) + 
+  geom_histogram(binwidth = 1, color = "black", fill = "grey") +
+  theme_bw() + 
+  labs(x = "Arrival day", y = "Number of fish arrived") +
+  theme(axis.title=element_text(size=25), axis.text=element_text(size=20)) + coord_cartesian(xlim=c(10,90)) 
+
+ggplot(data=pop$ac.df, aes(x=time, y=ac)) +
+  geom_line(size = 1) +
+  theme_bw() + 
+  theme(axis.title=element_text(size=25), axis.text=element_text(size=20)) +
+  labs(x = "Day", y = "Abundance of fish") + xlim(15, 100)
+  
+```
+
+```{r}
+# estimates
+t.e.7 <- TAUC(simdata, t, 10, l, v)
+g.e.7 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.7 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)  
+lower.l <- c(500, 10, 8, 0.01)
+upper.l <- c(2000, 80, 40, 6)
+ml.e.7 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 20, 7, 0.1)
+upper.p <- c(2000, 150, 30, 100)
+mp.e.7 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.7 <- Uncert.T(simdata, t, l, v)
+g.u.7 <- Uncert.G(simdata, t, l, v)
+
+mn.u.7 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.7 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.7 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+# Visualization
+b7 <- plotting.bias(c(t.e.7, g.e.7, ml.e.7, mn.e.7, mp.e.7), -25, 25)
+
+m7 <- plotting.mse(c(t.e.7, g.e.7, ml.e.7, mn.e.7, mp.e.7), 0, 30)
+
+var7 <- truevar(c(t.e.7, g.e.7, ml.e.7, mn.e.7, mp.e.7))
+
+u7 <- plotting.unc(t.u.7, g.u.7, ml.u.7, mn.u.7, mp.u.7, var7, -110, 600)
+
+```
+
+
+# Simulation 8: beta arrival, 6 counts, normal model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(25, 85, length.out = 6))
+pop <- sim.pop(1000, 2, 4, t, l, "beta")
+t1 <- round(seq(30, 80, length.out = 6))
+simdata <- sim.data(ac.df=pop$ac.df, t=t1, n=2000, v=v, epsilon="normal", sigma=1)
+
+# estimates
+t.e.8 <- TAUC(simdata, t, 10, l, v)
+g.e.8 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.8 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)  
+lower.l <- c(500, 10, 8, 0.01)
+upper.l <- c(2000, 80, 40, 6)
+ml.e.8 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 10, 5, 0.1)
+upper.p <- c(2000, 80, 20, 100)
+mp.e.8 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.8 <- Uncert.T(simdata, t, l, v)
+g.u.8 <- Uncert.G(simdata, t, l, v)
+mn.u.8 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.8 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.8 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+
+# Visualization
+b8 <- plotting.bias(c(t.e.8, g.e.8, ml.e.8, mn.e.8, mp.e.8), -25, 25)
+
+m8 <- plotting.mse(c(t.e.8, g.e.8, ml.e.8, mn.e.8, mp.e.8), 0, 30)
+
+var8 <- truevar(c(t.e.8, g.e.8, ml.e.8, mn.e.8, mp.e.8))
+
+u8 <- plotting.unc(t.u.8, g.u.8, ml.u.8, mn.u.8, mp.u.8, var8, -110,3000)
+
+```
+
+
+
+# Simulation 9: beta arrival, 4 counts, lognormal model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(25, 85, length.out = 4))
+pop <- sim.pop(1000, 2, 4, t, l, "beta")
+t1 <- round(seq(30, 80, length.out = 4))
+simdata <- sim.data(ac.df=pop$ac.df, t=t1, n=2000, v=v, epsilon="lognormal", sigma=0.1)
+
+# estimates
+t.e.9 <- TAUC(simdata, t, 10, l, v)
+g.e.9 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.9 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)  
+lower.l <- c(500, 10, 8, 0.01)
+upper.l <- c(2000, 80, 40, 6)
+ml.e.9 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 20, 7, 0.1)
+upper.p <- c(2000, 150, 30, 100)
+mp.e.9 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.9 <- Uncert.T(simdata, t, l, v)
+g.u.9 <- Uncert.G(simdata, t, l, v)
+
+mn.u.9 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.9 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.9 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+# Visualization
+
+b9 <- plotting.bias(c(t.e.9, g.e.9, ml.e.9, mn.e.9, mp.e.9), -25, 25)
+
+m9 <- plotting.mse(c(t.e.9, g.e.9, ml.e.9, mn.e.9, mp.e.9), 0, 30)
+
+var9 <- truevar(c(t.e.9, g.e.9, ml.e.9, mn.e.9, mp.e.9))
+
+u9 <- plotting.unc(t.u.9, g.u.9, ml.u.9, mn.u.9, mp.u.9, var9, -110, 110)
+
+```
+
+
+# Simulation 10: beta arrival, 6 counts, lognormal model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(25, 85, length.out = 6))
+pop <- sim.pop(1000, 2, 4, t, l, "beta")
+t1 <- round(seq(30, 80, length.out = 6))
+simdata <- sim.data(ac.df=pop$ac.df, t=t1, n=2000, v=v, epsilon="lognormal", sigma=0.1)
+
+# estimates
+t.e.10 <- TAUC(simdata, t, 10, l, v)
+g.e.10 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.10 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)  
+lower.l <- c(500, 10, 8, 0.01)
+upper.l <- c(2000, 80, 40, 6)
+ml.e.10 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 20, 7, 0.1)
+upper.p <- c(2000, 150, 30, 100)
+mp.e.10 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.10 <- Uncert.T(simdata, t, l, v)
+g.u.10 <- Uncert.G(simdata, t, l, v)
+
+mn.u.10 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.10 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.10 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+# Visualization
+
+b10 <- plotting.bias(c(t.e.10, g.e.10, ml.e.10, mn.e.10, mp.e.10), -25, 25)
+
+m10 <- plotting.mse(c(t.e.10, g.e.10, ml.e.10, mn.e.10, mp.e.10), 0, 30)
+
+var10 <- truevar(c(t.e.10, g.e.10, ml.e.10, mn.e.10, mp.e.10))
+
+u10 <- plotting.unc(t.u.10, g.u.10, ml.u.10, mn.u.10, mp.u.10, var10, -110, 110)
+
+```
+
+
+# Simulation 11: beta arrival, 4 counts, pseudopoisson model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(25, 85, length.out = 4))
+pop <- sim.pop(1000, 2, 4, t, l, "beta")
+t1 <- round(seq(30, 80, length.out = 4))
+simdata <- sim.data(ac.df=pop$ac.df, t=t1, n=2000, v=v, epsilon="pseudopoisson", q=2)
+simdata[simdata < 0] <- 0.001
+  
+
+# estimates
+t.e.11 <- TAUC(simdata, t, 10, l, v)
+g.e.11 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.11 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)  
+lower.l <- c(500, 10, 8, 0.01)
+upper.l <- c(2000, 80, 40, 6)
+ml.e.11 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 20, 7, 0.1)
+upper.p <- c(2000, 150, 30, 100)
+mp.e.11 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.11 <- Uncert.T(simdata, t, l, v)
+g.u.11 <- Uncert.G(simdata, t, l, v)
+
+mn.u.11 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.11 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.11 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+# Visualization
+b11 <- plotting.bias(c(t.e.11, g.e.11, ml.e.11, mn.e.11, mp.e.11), -25, 25)
+
+m11 <- plotting.mse(c(t.e.11, g.e.11, ml.e.11, mn.e.11, mp.e.11), 0, 30)
+
+var11 <- truevar(c(t.e.11, g.e.11, ml.e.11, mn.e.11, mp.e.11))
+
+u11 <- plotting.unc(t.u.11, g.u.11, ml.u.11, mn.u.11, mp.u.11, var11, -110, 110)
+
+```
+
+
+# Simulation 12: beta model, 6 counts, pseudopoisson model
+
+```{r}
+set.seed(1)
+l <- 10
+v <- 0.8
+t <- round(seq(25, 85, length.out = 6))
+pop <- sim.pop(1000, 2, 4, t, l, "beta")
+t1 <- round(seq(30, 80, length.out = 6))
+simdata <- sim.data(ac.df=pop$ac.df, t=t1, n=2000, v=v, epsilon="pseudopoisson", q=2)
+simdata[simdata < 0] <- 0.001
+
+# estimates
+t.e.12 <- TAUC(simdata, t, 10, l, v)
+g.e.12 <- GAUC(simdata, t, l, v)
+
+initial.n <- c(1000, 50, 10, 2)  
+lower.n <- c(500, 10, 8, 0.01)
+upper.n <- c(2000, 80, 40, 6)
+mn.e.12 <- HARR.N(simdata, initial.n, opt.n, lower.n, upper.n, t, l, v)
+
+initial.l <- c(1000, 50, 10, 0.1)  
+lower.l <- c(500, 10, 8, 0.01)
+upper.l <- c(2000, 80, 40, 6)
+ml.e.12 <- HARR.LN(simdata, initial.l, opt.l, lower.l, upper.l, t, l, v)
+
+initial.p <- c(1000, 50, 10, 10)
+lower.p <- c(500, 20, 7, 0.1)
+upper.p <- c(2000, 150, 30, 100)
+mp.e.12 <- HARR.P(simdata, initial.p, opt.p, lower.p, upper.p, t, l, v)
+
+# uncertainty
+t.u.12 <- Uncert.T(simdata, t, l, v)
+g.u.12 <- Uncert.G(simdata, t, l, v)
+
+mn.u.12 <- Uncert.H.N(simdata, initial.n, harr.n, lower.n, upper.n, t, l, v)
+ml.u.12 <- Uncert.H.L(simdata, initial.l, harr.ln, lower.l, upper.l, t, l, v)
+mp.u.12 <- Uncert.H.P(simdata, initial.p, harr.p, lower.p, upper.p, t, l, v)
+
+# Visualization
+b12 <- plotting.bias(c(t.e.12, g.e.12, ml.e.12, mn.e.12, mp.e.12), -25, 25)
+
+m12 <- plotting.mse(c(t.e.12, g.e.12, ml.e.12, mn.e.12, mp.e.12), 0, 30)
+
+var12 <- truevar(c(t.e.12, g.e.12, ml.e.12, mn.e.12, mp.e.12))
+
+u12 <- plotting.unc(t.u.12, g.u.12, ml.u.12, mn.u.12, mp.u.12, var12, -110, 110)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
